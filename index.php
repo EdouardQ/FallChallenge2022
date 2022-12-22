@@ -20,6 +20,8 @@ class Game {
     public $myMatter;
     public $oppMatter;
     public $map;
+    public $myRobots;
+    public $round;
 
     public $actions;
 
@@ -28,6 +30,7 @@ class Game {
 
         $this->map = new Map($width, $height);
         $this->actions = [];
+        $this->round = 1;
     }
 
     public function run() {
@@ -80,18 +83,129 @@ class Game {
             return implode(' ', $a);
         }, $this->actions)), PHP_EOL;
         $this->actions = [];
+        $this->round++;
     }
 
     public function think() {
-        debug(phpversion());
         $this->map->debug('scrapAmount');
 
-        // TODO: your code...
+        $this->protectBuild();
+        $this->randomSpawn();
+        $this->randomMove();
+    }
 
-        //$this->move(...)
-        //$this->build(...)
-        //$this->spawn(...)
-        //$this->wait();
+    public function randomMove()
+    {
+        for ($y = 0; $y < $this->map->height; $y++) {
+            for ($x = 0; $x < $this->map->width; $x++) {
+                $tile = $this->map->getTile($x, $y);
+                if ($tile->owner === 1 && $tile->units > 0) {
+                    $leftRobots = $tile->units;
+
+                    while ($leftRobots !== 0) {
+                        $usedRobots = random_int(1, $leftRobots);
+
+                        $move = $this->generateRandomCoordinates($x, $y);
+
+                        if ($move) {
+                            $this->move($usedRobots, $x, $y, $move[0], $move[1]);
+                        }
+
+                        $leftRobots -= $usedRobots;
+                    }
+                }
+            }
+        }
+    }
+
+    public function generateRandomCoordinates($x, $y)
+    {
+        $allMoves = $this->map->getAdjacentTiles($x, $y);
+        $priorityMoves = [];
+
+
+
+        for ($i = 0; $i < count($allMoves); $i++) {
+            $tile = $this->map->getTile($allMoves[$i][0], $allMoves[$i][1]);
+
+            if ($tile->scrapAmount > 0 && !$tile->recycler && !($tile->inRangeOfRecycler && $tile->scrapAmount === 1)) {
+                $possibleMoves[] = $allMoves[$i];
+
+                if ($tile->owner !== 1) {
+                    $priorityMoves[] = $allMoves[$i];
+                }
+            }
+        }
+
+        if (!empty($priorityMoves)) {
+            return $priorityMoves[random_int(0, count($priorityMoves)-1)];
+        } elseif (!empty($possibleMoves)) {
+            return $possibleMoves[random_int(0, count($possibleMoves)-1)];
+        }
+
+        return null;
+    }
+
+    public function randomSpawn()
+    {
+        if ($this->myMatter >=10) {
+            $ennemyFrontier = [];
+            $readyToExplore = [];
+            $possibleSpawnLocation = [];
+
+            for ($y = 0; $y < $this->map->height; $y++) {
+                for ($x = 0; $x < $this->map->width; $x++) {
+                    $tile = $this->map->getTile($x, $y);
+                    if ($tile->canSpawn) {
+                        foreach ($this->map->getAdjacentTiles($x, $y) as $adjacentTile) {
+                            $tileToTest = $this->map->getTile($adjacentTile[0], $adjacentTile[1]);
+                            if ($tileToTest->owner === 0 && !$tileToTest->recycler) {
+                                $ennemyFrontier[] = [$x, $y];
+                            } elseif ($tileToTest->owner === -1 && $tileToTest->scrapAmount > 0) {
+                                $readyToExplore[] = [$x, $y];
+                            }
+                        }
+
+                        $possibleSpawnLocation[] = [$x, $y];
+                    }
+                }
+            }
+
+            $nbrSpawn = random_int(1, intdiv($this->myMatter, 10));
+            for ($i = 1; $i <= $nbrSpawn; $i++) {
+
+                if (!empty($readyToExplore)) {
+                    $coordinates = $readyToExplore[random_int(0, count($readyToExplore)-1)];
+                } elseif (!empty($ennemyFrontier)) {
+                    $coordinates = $ennemyFrontier[random_int(0, count($ennemyFrontier)-1)];
+                } else {
+                    $coordinates = $possibleSpawnLocation[random_int(0, count($possibleSpawnLocation)-1)];
+                }
+
+                $this->spawn(1, $coordinates[0], $coordinates[1]);
+            }
+        }
+    }
+
+    public function protectBuild()
+    {
+        for ($y = 0; $y < $this->map->height; $y++) {
+            for ($x = 0; $x < $this->map->width; $x++) {
+                $tile = $this->map->getTile($x, $y);
+                if ($tile->owner === 1) {
+                    $adjacentTiles = $this->map->getAdjacentTiles($x, $y);
+                    foreach ($adjacentTiles as $adjacentTile) {
+                        $tileToTest = $this->map->getTile($adjacentTile[0], $adjacentTile[1]);
+                        if ($tileToTest->owner === 0 && $tileToTest->units > 0) {
+                            $this->build($x, $y);
+                            $this->map->getTile($x, $y)->recycler = true;
+                            $this->myMatter -= 10;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -111,6 +225,55 @@ class Map {
     public $height;
     public $tiles;
     private $BFS_CACHE;
+
+    public function __construct($width, $height) {
+        $this->width = $width;
+        $this->height = $height;
+        $this->tiles = [];
+
+        for ($i=0; $i<$this->width*$this->height; $i++) {
+            $this->tiles[] = new Tile();
+        }
+    }
+
+    public function setTile($x, $y, $scrapAmount, $owner, $units, $recycler, $canBuild, $canSpawn, $inRangeOfRecycler) {
+        if ($x < 0 || $x >= $this->width || $y < 0 || $y >= $this->height) throw new RuntimeException("Invalid setTile coord $x,$y");
+
+        $tile = $this->tiles[$x+$y*$this->width];
+        $tile->scrapAmount = (int)$scrapAmount;
+        $tile->owner = (int)$owner;
+        $tile->units = (int)$units;
+        $tile->recycler = (bool)$recycler;
+        $tile->canBuild = (bool)$canBuild;
+        $tile->canSpawn = (bool)$canSpawn;
+        $tile->inRangeOfRecycler = (bool)$inRangeOfRecycler;
+    }
+
+    public function getTile($x, $y) {
+        if ($x < 0 || $x >= $this->width || $y < 0 || $y >= $this->height) throw new RuntimeException("Invalid getTile coord $x,$y");
+
+        return $this->tiles[$x+$y*$this->width];
+    }
+
+    public function getAdjacentTiles($x, $y)
+    {
+        $tiles = [];
+
+        if ($x-1 >= 0) {
+            $tiles[] = [$x-1, $y];
+        }
+        if ($x+1 < $this->width) {
+            $tiles[] = [$x+1, $y];
+        }
+        if ($y-1 >= 0) {
+            $tiles[] = [$x, $y-1];
+        }
+        if ($y+1 < $this->height) {
+            $tiles[] = [$x, $y+1];
+        }
+
+        return $tiles;
+    }
 
     public function bfsDistance($sx, $sy, $dx, $dy) {
         // 5 bits per coordinate
@@ -178,35 +341,6 @@ class Map {
         }
 
         return $this->BFS_CACHE[$key1] = $this->BFS_CACHE[$key2] = -1;
-    }
-
-    public function __construct($width, $height) {
-        $this->width = $width;
-        $this->height = $height;
-        $this->tiles = [];
-
-        for ($i=0; $i<$this->width*$this->height; $i++) {
-            $this->tiles[] = new Tile();
-        }
-    }
-
-    public function setTile($x, $y, $scrapAmount, $owner, $units, $recycler, $canBuild, $canSpawn, $inRangeOfRecycler) {
-        if ($x < 0 || $x >= $this->width || $y < 0 || $y >= $this->height) throw new RuntimeException("Invalid setTile coord $x,$y");
-
-        $tile = $this->tiles[$x+$y*$this->width];
-        $tile->scrapAmount = (int)$scrapAmount;
-        $tile->owner = (int)$owner;
-        $tile->units = (int)$units;
-        $tile->recycler = (bool)$recycler;
-        $tile->canBuild = (bool)$canBuild;
-        $tile->canSpawn = (bool)$canSpawn;
-        $tile->inRangeOfRecycler = (bool)$inRangeOfRecycler;
-    }
-
-    public function getTile($x, $y) {
-        if ($x < 0 || $x >= $this->width || $y < 0 || $y >= $this->height) throw new RuntimeException("Invalid getTile coord $x,$y");
-
-        return $this->tiles[$x+$y*$this->width];
     }
 
     public function debug($field = 'scrapAmount') {
